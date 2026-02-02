@@ -1,0 +1,5 @@
+# Python dependencies for data import script
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+pymongo
+python-dotenv
