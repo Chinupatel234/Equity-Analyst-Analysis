@@ -3,8 +3,8 @@
     "version": "3.1 - Analyst Edition",
     "last_updated": "2026-01-30",
     "description": "Streamlined earnings analysis for equity analysts",
-    "quarters_analyzed": 16,
-    "coverage": "2018 Q1-Q4, 2019 Q1-Q4, 2020 Q1-Q4, 2021 Q1-Q4"
+    "quarters_analyzed": 32,
+    "coverage": "2018 Q1-Q4, 2019 Q1-Q4, 2020 Q1-Q4, 2021 Q1-Q4, 2022 Q1-Q4, 2023 Q1-Q4, 2024 Q1-Q4, 2025 Q1-Q4"
   },
   "companies": {
     "GOOG": {
@@ -750,7 +750,7 @@
                   "2.2_cost_efficiency": 0.5,
                   "2.3_cash_flow": 0.5,
                   "2.4_margins": -0.5,
-                  "2.5_external_factors": 1.5
+                  "2.5_external_factors": 1.0
                 },
                 "management_quality": {
                   "3.1_strategy_execution": 0.5,

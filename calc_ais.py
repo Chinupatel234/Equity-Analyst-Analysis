@@ -58,6 +58,30 @@ def fetch_quarter_data(client, ticker, year, quarter):
     except AttributeError:
         return None
 
+def fetch_quarter_metadata(client, ticker, year, quarter):
+    """
+    Retrieves metadata like call_date for a specific company > year > quarter.
+    """
+    db = client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+
+    doc = collection.find_one({"_id": ticker})
+    
+    if not doc:
+        return None
+
+    try:
+        quarter_data = doc.get("years", {}).get(str(year), {}).get(quarter, {})
+        if not quarter_data:
+            return None
+            
+        return {
+            "call_date": quarter_data.get("call_date"),
+            "transcript_id": quarter_data.get("transcript_id")
+        }
+    except AttributeError:
+        return None
+
 # --- 2. DATA NORMALIZATION ---
 def normalize_db_scores(db_scores, weights_config):
     """
@@ -183,33 +207,13 @@ def process_all_data(client, weights):
     return summary_results
 
 # --- MAIN EXECUTION ---
-if __name__ == "__main__":
-    try:
-        # 1. Load Config
-        weights = load_weights_config()
-        
-        # 2. Connect DB
-        client = get_mongo_connection()
-        
-        if client:
-            # 3. Run Dynamic Batch Process
-            results = process_all_data(client, weights)
-            
-            # 4. Print Summary Table
-            print("\n" + "="*65)
-            # Updated Header to include Weighted AIS
-            print(f"{'TICKER':<10} | {'YEAR':<6} | {'QTR':<5} | {'AIS SCORE':<10} | {'WEIGHTED AIS':<12}")
-            print("-" * 65)
-            
-            # Sort results by Ticker, then Year, then Quarter
-            results.sort(key=lambda x: (x['Ticker'], x['Year'], x['Quarter']))
-            
-            for r in results:
-                # Updated Row Format
-                print(f"{r['Ticker']:<10} | {r['Year']:<6} | {r['Quarter']:<5} | {r['AIS']:<10.4f} | {r['Weighted_AIS']:.4f}")
-            
-            print("="*65)
-            print(f"Total Records Processed: {len(results)}")
-
-    except Exception as e:
-        print(f"\n⚠️ Critical Error: {e}")
+# --- MAIN EXECUTION (FOR TESTING ONLY) ---
+# if __name__ == "__main__":
+#     try:
+#         weights = load_weights_config()
+#         client = get_mongo_connection()
+#         if client:
+#             results = process_all_data(client, weights)
+#             print(f"Processed {len(results)} records.")
+#     except Exception as e:
+#         print(f"Error: {e}")

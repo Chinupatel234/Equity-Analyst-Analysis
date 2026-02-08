@@ -1,5 +1,6 @@
-# Python dependencies for data import script
-psycopg2-binary==2.9.9
-python-dotenv==1.0.0
+# Core Dependencies
+anthropic
+requests
 pymongo
 python-dotenv
+certifi
