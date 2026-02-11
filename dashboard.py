@@ -254,25 +254,43 @@ def get_qualitative_data(client, ticker, year, quarter):
         return None, None, 0.0
 
 # --- VISUALIZATION FUNCTIONS ---
-def plot_radar_chart(normalized_scores, weights_config):
-    """Creates an Interactive Radar Chart"""
+def plot_radar_chart(normalized_scores, weights_config, selected_sub_key=None):
+    """Creates an Interactive Radar Chart with optional highlighting"""
     categories = []
     values = []
-    
+    sub_keys = []  # Track sub-keys for highlighting
+
     # Flatten the dictionary
-    for criteria, subs in normalized_scores.items():
+    for subs in normalized_scores.values():
         for sub_key, score in subs.items():
             # Clean key name (remove "1.1_")
             clean_name = sub_key.split("_", 1)[1].replace("_", " ").title() if "_" in sub_key else sub_key
             categories.append(clean_name)
             values.append(score)
-    
+            sub_keys.append(sub_key)
+
     # Close the loop for radar chart
     categories.append(categories[0])
     values.append(values[0])
+    sub_keys.append(sub_keys[0])
 
     fig = go.Figure()
-    
+
+    # Determine marker colors and sizes based on selection
+    marker_colors = []
+    marker_sizes = []
+    for sub in sub_keys[:-1]:  # Exclude the duplicate closing point
+        if selected_sub_key and sub == selected_sub_key:
+            marker_colors.append('#00FFFF')  # Bright cyan for selected
+            marker_sizes.append(16)
+        else:
+            marker_colors.append('#FF4B4B')
+            marker_sizes.append(6)
+
+    # Add the duplicate for closing the loop
+    marker_colors.append(marker_colors[0])
+    marker_sizes.append(marker_sizes[0])
+
     fig.add_trace(go.Scatterpolar(
         r=values,
         theta=categories,
@@ -280,10 +298,15 @@ def plot_radar_chart(normalized_scores, weights_config):
         name='AIS Score',
         line_color='#FF4B4B',
         fillcolor='rgba(255, 75, 75, 0.2)',
-        mode='lines+markers',  # Added markers for easier hovering
-        marker=dict(size=6),
+        mode='lines+markers',
+        marker=dict(
+            size=marker_sizes,
+            color=marker_colors,
+            line=dict(width=3, color='white'),
+            opacity=[1.0 if c == '#00FFFF' else 0.9 for c in marker_colors]  # Full opacity for selected
+        ),
         # Custom Hover Tooltip
-        hovertemplate='<b>%{theta}</b><br>Score: %{r:.2f}<extra></extra>' 
+        hovertemplate='<b>%{theta}</b><br>Score: %{r:.2f}<extra></extra>'
     ))
 
     fig.update_layout(
@@ -301,7 +324,7 @@ def plot_radar_chart(normalized_scores, weights_config):
         font=dict(color='white'),
         showlegend=False,
         margin=dict(l=40, r=40, t=20, b=20),
-        hovermode="closest" # Ensures the closest point highlights
+        hovermode="closest"
     )
     return fig
 
@@ -610,61 +633,69 @@ def render_dashboard(client, weights_config, default_weights):
 
     st.divider()
 
+    # --- Sub-Criteria Labels (moved up for use in both sections) ---
+    SUB_CRITERIA_LABELS = {
+        "growth_potential": {
+            "1.1_market_expansion": "1.1 Market & Geographic Expansion",
+            "1.2_product_development": "1.2 Product & Service Development",
+            "1.3_ma_partnerships": "1.3 M&A and Partnerships",
+            "1.4_digital_transformation": "1.4 Digital Transformation",
+            "1.5_diversification": "1.5 Operational Efficiency & Diversification"
+        },
+        "earnings_quality": {
+            "2.1_revenue_sustainability": "2.1 Revenue Quality & Sustainability",
+            "2.2_cost_efficiency": "2.2 Cost Management & Efficiency",
+            "2.3_cash_flow": "2.3 Capital & Cash Flow Management",
+            "2.4_margins": "2.4 Profitability & Margin Analysis",
+            "2.5_external_factors": "2.5 External Factors & Accounting"
+        },
+        "management_quality": {
+            "3.1_strategy_execution": "3.1 Strategic Planning & Execution",
+            "3.2_capital_allocation": "3.2 Capital & Financial Management",
+            "3.3_adaptability": "3.3 Adaptability & Responsiveness",
+            "3.4_leadership": "3.4 Leadership & Organizational Effectiveness",
+            "3.5_operational_efficiency": "3.5 Operational & Cost Efficiency"
+        },
+        "business_risks": {
+            "4.1_market_economic": "4.1 Market & Economic Risks",
+            "4.2_financial_credit": "4.2 Credit & Financial Risks",
+            "4.3_operational_compliance": "4.3 Operational & Compliance Risks",
+            "4.4_strategic": "4.4 Strategic & Business Risks",
+            "4.5_tech_product": "4.5 Product & Technological Risks"
+        }
+    }
+
+    criteria_options = {
+        "growth_potential": "🚀 Growth Potential",
+        "earnings_quality": "💰 Earnings Quality",
+        "management_quality": "👔 Quality of Management",
+        "business_risks": "⚠️ Business Risks"
+    }
+
     # Radar Chart & Context
     col_radar, col_details = st.columns([1, 1])
 
     with col_radar:
         st.subheader("🎯 20-Point Sub-Criteria Analysis")
-        # Interactive Plotly Chart
-        fig = plot_radar_chart(clean_scores, weights_config)
-        st.plotly_chart(fig, use_container_width=True)
+        st.caption("💡 Use the dropdowns to highlight points on the chart →")
+
+        # Get selected sub-criteria from deep dive section
+        selected_sub_for_chart = st.session_state.get('reasoning_sub', None)
+
+        # Interactive Plotly Chart with highlighting
+        fig = plot_radar_chart(clean_scores, weights_config, selected_sub_for_chart)
+
+        # Display the chart
+        st.plotly_chart(fig, use_container_width=True, key="radar_chart")
 
     with col_details:
         st.subheader("🔍 Sub-Criteria Deep Dive")
+        st.caption("💡 Selection highlights on chart ←")
 
         # Fetch reasoning data from MongoDB
         reasoning_data = calc_ais.fetch_quarter_reasoning(
             client, selected_ticker, selected_year, selected_quarter
         )
-
-        # --- Sub-Criteria Labels ---
-        SUB_CRITERIA_LABELS = {
-            "growth_potential": {
-                "1.1_market_expansion": "1.1 Market & Geographic Expansion",
-                "1.2_product_development": "1.2 Product & Service Development",
-                "1.3_ma_partnerships": "1.3 M&A and Partnerships",
-                "1.4_digital_transformation": "1.4 Digital Transformation",
-                "1.5_diversification": "1.5 Operational Efficiency & Diversification"
-            },
-            "earnings_quality": {
-                "2.1_revenue_sustainability": "2.1 Revenue Quality & Sustainability",
-                "2.2_cost_efficiency": "2.2 Cost Management & Efficiency",
-                "2.3_cash_flow": "2.3 Capital & Cash Flow Management",
-                "2.4_margins": "2.4 Profitability & Margin Analysis",
-                "2.5_external_factors": "2.5 External Factors & Accounting"
-            },
-            "management_quality": {
-                "3.1_strategy_execution": "3.1 Strategic Planning & Execution",
-                "3.2_capital_allocation": "3.2 Capital & Financial Management",
-                "3.3_adaptability": "3.3 Adaptability & Responsiveness",
-                "3.4_leadership": "3.4 Leadership & Organizational Effectiveness",
-                "3.5_operational_efficiency": "3.5 Operational & Cost Efficiency"
-            },
-            "business_risks": {
-                "4.1_market_economic": "4.1 Market & Economic Risks",
-                "4.2_financial_credit": "4.2 Credit & Financial Risks",
-                "4.3_operational_compliance": "4.3 Operational & Compliance Risks",
-                "4.4_strategic": "4.4 Strategic & Business Risks",
-                "4.5_tech_product": "4.5 Product & Technological Risks"
-            }
-        }
-
-        criteria_options = {
-            "growth_potential": "🚀 Growth Potential",
-            "earnings_quality": "💰 Earnings Quality",
-            "management_quality": "👔 Quality of Management",
-            "business_risks": "⚠️ Business Risks"
-        }
 
         # Two-level dropdown selection
         sel_criterion = st.selectbox(
