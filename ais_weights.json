@@ -1,36 +1,36 @@
 {
     "criteria_weights": {
-        "growth_potential": 0.25,
-        "earnings_quality": 0.30,
-        "management_quality": 0.25,
-        "business_risks": 0.20
+        "growth_potential": 0.35,
+        "earnings_quality": 0.3,
+        "management_quality": 0.15,
+        "business_risks": 0.2
     },
     "sub_criteria_definitions": {
         "growth_potential": {
-            "1.1_market_expansion": 0.30,
-            "1.2_product_development": 0.20,
-            "1.3_ma_partnerships": 0.20,
+            "1.1_market_expansion": 0.3,
+            "1.2_product_development": 0.2,
+            "1.3_ma_partnerships": 0.2,
             "1.4_digital_transformation": 0.15,
             "1.5_diversification": 0.15
         },
         "earnings_quality": {
-            "2.1_revenue_sustainability": 0.30,
-            "2.2_cost_efficiency": 0.20,
-            "2.3_cash_flow": 0.20,
+            "2.1_revenue_sustainability": 0.3,
+            "2.2_cost_efficiency": 0.2,
+            "2.3_cash_flow": 0.2,
             "2.4_margins": 0.15,
             "2.5_external_factors": 0.15
         },
         "management_quality": {
-            "3.1_strategy_execution": 0.30,
-            "3.2_capital_allocation": 0.20,
-            "3.3_adaptability": 0.20,
+            "3.1_strategy_execution": 0.3,
+            "3.2_capital_allocation": 0.2,
+            "3.3_adaptability": 0.2,
             "3.4_leadership": 0.15,
             "3.5_operational_efficiency": 0.15
         },
         "business_risks": {
-            "4.1_market_economic": 0.30,
-            "4.2_financial_credit": 0.20,
-            "4.3_operational_compliance": 0.20,
+            "4.1_market_economic": 0.3,
+            "4.2_financial_credit": 0.2,
+            "4.3_operational_compliance": 0.2,
             "4.4_strategic": 0.15,
             "4.5_tech_product": 0.15
         }
