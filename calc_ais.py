@@ -82,6 +82,25 @@ def fetch_quarter_metadata(client, ticker, year, quarter):
     except AttributeError:
         return None
 
+def fetch_quarter_reasoning(client, ticker, year, quarter):
+    """
+    Queries MongoDB for sub_criteria_reasoning for a specific quarter.
+    Returns the reasoning dict or None if not available.
+    """
+    db = client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+
+    doc = collection.find_one({"_id": ticker})
+
+    if not doc:
+        return None
+
+    try:
+        quarter_data = doc.get("years", {}).get(str(year), {}).get(quarter, {})
+        return quarter_data.get("ais_analysis", {}).get("sub_criteria_reasoning")
+    except AttributeError:
+        return None
+
 # --- 2. DATA NORMALIZATION ---
 def normalize_db_scores(db_scores, weights_config):
     """

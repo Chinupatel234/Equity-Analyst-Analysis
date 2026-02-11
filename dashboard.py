@@ -620,21 +620,141 @@ def render_dashboard(client, weights_config, default_weights):
         st.plotly_chart(fig, use_container_width=True)
 
     with col_details:
-        st.subheader("📝 Qualitative Context")
-        
-        if qualitative_data:
-            with st.expander("📌 Key Events", expanded=True):
-                events = qualitative_data.get('key_events', [])
-                for e in events:
-                    st.markdown(f"- {e}")
-            
-            with st.expander("🔮 Management Guidance", expanded=True):
-                guidance = qualitative_data.get('management_guidance', {})
-                for k, v in guidance.items():
-                    clean_k = k.replace("_", " ").title()
-                    st.markdown(f"**{clean_k}:** {v}")
+        st.subheader("🔍 Sub-Criteria Deep Dive")
+
+        # Fetch reasoning data from MongoDB
+        reasoning_data = calc_ais.fetch_quarter_reasoning(
+            client, selected_ticker, selected_year, selected_quarter
+        )
+
+        # --- Sub-Criteria Labels ---
+        SUB_CRITERIA_LABELS = {
+            "growth_potential": {
+                "1.1_market_expansion": "1.1 Market & Geographic Expansion",
+                "1.2_product_development": "1.2 Product & Service Development",
+                "1.3_ma_partnerships": "1.3 M&A and Partnerships",
+                "1.4_digital_transformation": "1.4 Digital Transformation",
+                "1.5_diversification": "1.5 Operational Efficiency & Diversification"
+            },
+            "earnings_quality": {
+                "2.1_revenue_sustainability": "2.1 Revenue Quality & Sustainability",
+                "2.2_cost_efficiency": "2.2 Cost Management & Efficiency",
+                "2.3_cash_flow": "2.3 Capital & Cash Flow Management",
+                "2.4_margins": "2.4 Profitability & Margin Analysis",
+                "2.5_external_factors": "2.5 External Factors & Accounting"
+            },
+            "management_quality": {
+                "3.1_strategy_execution": "3.1 Strategic Planning & Execution",
+                "3.2_capital_allocation": "3.2 Capital & Financial Management",
+                "3.3_adaptability": "3.3 Adaptability & Responsiveness",
+                "3.4_leadership": "3.4 Leadership & Organizational Effectiveness",
+                "3.5_operational_efficiency": "3.5 Operational & Cost Efficiency"
+            },
+            "business_risks": {
+                "4.1_market_economic": "4.1 Market & Economic Risks",
+                "4.2_financial_credit": "4.2 Credit & Financial Risks",
+                "4.3_operational_compliance": "4.3 Operational & Compliance Risks",
+                "4.4_strategic": "4.4 Strategic & Business Risks",
+                "4.5_tech_product": "4.5 Product & Technological Risks"
+            }
+        }
+
+        criteria_options = {
+            "growth_potential": "🚀 Growth Potential",
+            "earnings_quality": "💰 Earnings Quality",
+            "management_quality": "👔 Quality of Management",
+            "business_risks": "⚠️ Business Risks"
+        }
+
+        # Two-level dropdown selection
+        sel_criterion = st.selectbox(
+            "Criterion",
+            list(criteria_options.keys()),
+            format_func=lambda x: criteria_options[x],
+            key="reasoning_criterion"
+        )
+
+        sub_opts = SUB_CRITERIA_LABELS[sel_criterion]
+        sel_sub = st.selectbox(
+            "Sub-Criterion",
+            list(sub_opts.keys()),
+            format_func=lambda x: sub_opts[x],
+            key="reasoning_sub"
+        )
+
+        # Get the score for selected sub-criterion
+        score = clean_scores.get(sel_criterion, {}).get(sel_sub, 0.0)
+        score_color = "#4CAF50" if score > 0 else "#F44336" if score < 0 else "#FFC107"
+
+        # Build reasoning card
+        if reasoning_data:
+            reasoning = reasoning_data.get(sel_criterion, {}).get(sel_sub, {})
+            if reasoning:
+                rationale = reasoning.get("rationale", "No rationale available")
+                evidence = reasoning.get("evidence", "No evidence available")
+                strength = reasoning.get("evidence_strength", "Unknown")
+
+                strength_colors = {
+                    "Strong": "#4CAF50", "Moderate": "#2196F3",
+                    "Weak": "#FF9800", "None": "#9E9E9E"
+                }
+                s_color = strength_colors.get(strength, "#9E9E9E")
+
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #1a1c2e 0%, #262940 100%);
+                            border: 1px solid #3a3f55; border-radius: 12px; padding: 20px;
+                            margin: 10px 0; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                        <span style="color: #E0E0E0; font-weight: 600; font-size: 1.05em;">
+                            {sub_opts[sel_sub]}
+                        </span>
+                        <span style="background: {score_color}; color: white; padding: 4px 14px;
+                                     border-radius: 20px; font-weight: 700; font-size: 1.1em;">
+                            {score:+.1f}
+                        </span>
+                    </div>
+                    <div style="border-top: 1px solid #3a3f55; padding-top: 12px;">
+                        <div style="color: #9CA3AF; font-size: 0.8em; text-transform: uppercase;
+                                    letter-spacing: 1px; margin-bottom: 6px;">Rationale</div>
+                        <div style="color: #E5E7EB; margin-bottom: 14px; line-height: 1.5;">
+                            {rationale}
+                        </div>
+                        <div style="color: #9CA3AF; font-size: 0.8em; text-transform: uppercase;
+                                    letter-spacing: 1px; margin-bottom: 6px;">Key Evidence</div>
+                        <div style="color: #B0BEC5; margin-bottom: 14px; font-style: italic;
+                                    line-height: 1.5; border-left: 3px solid #3a3f55; padding-left: 12px;">
+                            {evidence}
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: #9CA3AF; font-size: 0.8em;">Evidence Strength:</span>
+                            <span style="background: {s_color}; color: white; padding: 3px 10px;
+                                         border-radius: 10px; font-size: 0.8em; font-weight: 600;">
+                                {strength}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.info("No reasoning available for this sub-criterion.")
         else:
-            st.info("No qualitative highlights available for this quarter.")
+            # Fallback: show score without reasoning
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #1a1c2e 0%, #262940 100%);
+                        border: 1px solid #3a3f55; border-radius: 12px; padding: 20px;
+                        margin: 10px 0;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="color: #E0E0E0; font-weight: 600;">{sub_opts[sel_sub]}</span>
+                    <span style="background: {score_color}; color: white; padding: 4px 14px;
+                                 border-radius: 20px; font-weight: 700; font-size: 1.1em;">
+                        {score:+.1f}
+                    </span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption("💡 Reasoning data not yet available for this quarter. Run enrich_reasoning.py to generate.")
+
+    st.markdown("---")
 
     # Raw Data Table (Hidden)
     with st.expander("Show Raw Data Calculation"):
@@ -893,7 +1013,7 @@ def render_compare_page(client, weights_config, default_weights):
     with q_col1:
         st.markdown(f"#### 🏛️ {label_a_context}")
         if qual_a:
-            with st.expander("🔮 Management Guidance", expanded=True):
+            with st.expander("📊 Forward Guidance", expanded=True):
                 guidance = qual_a.get('management_guidance', {})
                 if guidance:
                     for k, v in guidance.items():
@@ -901,8 +1021,8 @@ def render_compare_page(client, weights_config, default_weights):
                         st.markdown(f"**{clean_k}:** {v}")
                 else:
                     st.caption("No specific guidance provided.")
-            
-            with st.expander("📌 Key Events", expanded=True):
+
+            with st.expander("⭐ Quarter Highlights", expanded=True):
                 events = qual_a.get('key_events', [])
                 if events:
                     for e in events:
@@ -915,7 +1035,7 @@ def render_compare_page(client, weights_config, default_weights):
     with q_col2:
         st.markdown(f"#### 🏛️ {label_b_context}")
         if qual_b:
-            with st.expander("🔮 Management Guidance", expanded=True):
+            with st.expander("📊 Forward Guidance", expanded=True):
                 guidance = qual_b.get('management_guidance', {})
                 if guidance:
                     for k, v in guidance.items():
@@ -923,8 +1043,8 @@ def render_compare_page(client, weights_config, default_weights):
                         st.markdown(f"**{clean_k}:** {v}")
                 else:
                     st.caption("No specific guidance provided.")
-            
-            with st.expander("📌 Key Events", expanded=True):
+
+            with st.expander("⭐ Quarter Highlights", expanded=True):
                 events = qual_b.get('key_events', [])
                 if events:
                     for e in events:
