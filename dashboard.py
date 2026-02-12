@@ -1,6 +1,8 @@
 import streamlit as st
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 import calc_ais  # Imports the file above
 import json
 
@@ -1085,6 +1087,608 @@ def render_compare_page(client, weights_config, default_weights):
         else:
             st.warning("No qualitative data available.")
 
+def generate_quarter_sequence(anchor_year, anchor_quarter, num_quarters, data_map, ticker):
+    """
+    Generate a chronological list of (year, quarter) tuples going backwards
+    from the anchor point. Only includes quarters that exist in data_map.
+    """
+    all_quarters = []
+    for yr in sorted(data_map.get(ticker, {}).keys()):
+        for q in sorted(data_map[ticker][yr]):
+            all_quarters.append((yr, q))
+
+    # Find the anchor index
+    anchor = (str(anchor_year), anchor_quarter)
+    if anchor not in all_quarters:
+        return []
+
+    anchor_idx = all_quarters.index(anchor)
+
+    # Grab up to num_quarters ending at anchor (inclusive)
+    start_idx = max(0, anchor_idx - num_quarters + 1)
+    return all_quarters[start_idx:anchor_idx + 1]
+
+
+def render_trend_page(client, weights_config, default_weights):
+    st.markdown("""
+    <div class="header-bar">
+        <div>
+            <div class="brand">INSTITUTIONAL TREND ANALYSIS</div>
+            <div class="brand-sub">Weighted AIS Momentum, Regime & Decomposition</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tickers_list, data_map = get_available_filters(client)
+    if not tickers_list:
+        st.warning("No data found.")
+        st.stop()
+
+    # ===== STRICT WEIGHT VALIDATION =====
+    weight_errors = []
+    crit_sum = sum(
+        st.session_state.get(f"cw_{c}", 0)
+        for c in default_weights["criteria_weights"]
+    )
+    if crit_sum != 100:
+        weight_errors.append(f"**Criteria weights** sum to **{crit_sum}%** (must be 100%)")
+    for crit, subs in default_weights["sub_criteria_definitions"].items():
+        sub_sum = sum(st.session_state.get(f"sw_{sk}", 0) for sk in subs)
+        if sub_sum != 100:
+            label = CRITERIA_DISPLAY.get(crit, crit.replace("_", " ").title())
+            weight_errors.append(f"**{label}** sub-criteria sum to **{sub_sum}%** (must be 100%)")
+    if weight_errors:
+        st.error("Weights must sum to exactly 100% before analysis can run.")
+        for err in weight_errors:
+            st.warning(err)
+        st.info("Adjust the sliders in the **Weight Configuration** panel or click **Reset**.")
+        return
+
+    # --- Controls ---
+    ctrl1, ctrl2, ctrl3 = st.columns([2, 1.5, 1.5])
+    with ctrl1:
+        trend_ticker = st.selectbox(
+            "Company", tickers_list, key="trend_ticker",
+            label_visibility="collapsed", help="Select a company"
+        )
+    with ctrl2:
+        trend_years = sorted(data_map[trend_ticker].keys(), reverse=True)
+        trend_year = st.selectbox(
+            "Year", trend_years, key="trend_year",
+            label_visibility="collapsed", help="Anchor year"
+        )
+    with ctrl3:
+        trend_qtrs = data_map[trend_ticker][trend_year]
+        trend_qtr = st.selectbox(
+            "Quarter", trend_qtrs, key="trend_qtr",
+            label_visibility="collapsed", help="Anchor quarter (current)"
+        )
+
+    st.divider()
+
+    # --- Slider + Toggle ---
+    opt1, opt2 = st.columns([2, 1])
+    with opt1:
+        num_quarters = st.slider(
+            "Number of Quarters", min_value=4, max_value=12, value=4, step=1,
+            key="trend_num_q",
+            help="Min 4 (same year) / Max 12 (spans ~3 years)"
+        )
+    with opt2:
+        include_current = st.toggle(
+            "Include Current Quarter", value=True, key="trend_include",
+            help="ON = compare current quarter against historical moving average"
+        )
+
+    st.divider()
+
+    # --- Build Quarter Sequence ---
+    sequence = generate_quarter_sequence(
+        trend_year, trend_qtr, num_quarters, data_map, trend_ticker
+    )
+    if len(sequence) < 2:
+        st.warning("Not enough historical data for the selected range.")
+        return
+
+    # =================================================================
+    #  DATA ENGINE — Fetch overall + criteria-level scores per quarter
+    # =================================================================
+    CRITERIA_KEYS = list(weights_config["criteria_weights"].keys())
+    CRITERIA_SHORT = {
+        "growth_potential": "Growth",
+        "earnings_quality": "Earnings Qlty",
+        "management_quality": "Mgmt Qlty",
+        "business_risks": "Biz Risks",
+    }
+
+    quarter_labels = []
+    scores = []
+    criteria_series = {c: [] for c in CRITERIA_KEYS}  # per-criteria scores
+
+    for yr, q in sequence:
+        raw_sub = calc_ais.fetch_quarter_data(client, trend_ticker, yr, q)
+        label = f"{q} {yr}"
+        quarter_labels.append(label)
+        if raw_sub:
+            clean = calc_ais.normalize_db_scores(raw_sub, weights_config)
+            w_score = calc_ais.calculate_weighted_ais(weights_config, clean)
+            scores.append(w_score)
+            # Criteria-level weighted contributions
+            for crit in CRITERIA_KEYS:
+                cw = weights_config["criteria_weights"][crit]
+                sub_def = weights_config["sub_criteria_definitions"].get(crit, {})
+                crit_subs = clean.get(crit, {})
+                c_score = sum(crit_subs.get(k, 0.0) * w for k, w in sub_def.items())
+                criteria_series[crit].append(c_score * cw)
+        else:
+            scores.append(None)
+            for crit in CRITERIA_KEYS:
+                criteria_series[crit].append(None)
+
+    valid_scores = [s for s in scores if s is not None]
+    if len(valid_scores) < 2:
+        st.warning("Not enough valid data points.")
+        return
+
+    # =================================================================
+    #  ANALYTICS ENGINE
+    # =================================================================
+    current_label = quarter_labels[-1]
+    current_score = scores[-1]
+
+    if include_current and current_score is not None:
+        historical_scores = [s for s in scores[:-1] if s is not None]
+    else:
+        historical_scores = valid_scores
+
+    if not historical_scores:
+        st.warning("No valid historical scores to compute a moving average.")
+        return
+
+    # --- Dual Moving Averages (Short & Long) ---
+    short_window = max(2, min(3, len(valid_scores) - 1))
+    long_window = max(3, min(6, len(valid_scores)))
+
+    def rolling_ma(data, window):
+        """Compute rolling MA over a list, handling Nones."""
+        result = []
+        buf = []
+        for v in data:
+            if v is not None:
+                buf.append(v)
+            if len(buf) >= window:
+                result.append(np.mean(buf[-window:]))
+            elif buf:
+                result.append(np.mean(buf))
+            else:
+                result.append(None)
+        return result
+
+    short_ma = rolling_ma(scores, short_window)
+    long_ma = rolling_ma(scores, long_window)
+
+    # --- Bollinger Bands (2-sigma around long MA) ---
+    def rolling_std(data, window):
+        result = []
+        buf = []
+        for v in data:
+            if v is not None:
+                buf.append(v)
+            if len(buf) >= window:
+                result.append(np.std(buf[-window:], ddof=1))
+            elif len(buf) > 1:
+                result.append(np.std(buf, ddof=1))
+            else:
+                result.append(0.0)
+        return result
+
+    long_std_series = rolling_std(scores, long_window)
+    bb_upper = [m + 2 * s if m is not None else None for m, s in zip(long_ma, long_std_series)]
+    bb_lower = [m - 2 * s if m is not None else None for m, s in zip(long_ma, long_std_series)]
+
+    # --- Overall Statistics ---
+    moving_avg = np.mean(historical_scores)
+    moving_std = np.std(historical_scores, ddof=1) if len(historical_scores) > 1 else 0.0
+
+    # --- QoQ Momentum ---
+    qoq_changes = []
+    for i in range(len(scores)):
+        if i == 0 or scores[i] is None or scores[i - 1] is None:
+            qoq_changes.append(0.0)
+        else:
+            qoq_changes.append(scores[i] - scores[i - 1])
+
+    # --- Jump Detection ---
+    jump = None
+    jump_pct = None
+    is_significant = False
+    z_score_val = 0.0
+    significance_threshold = 1.5
+
+    if include_current and current_score is not None and historical_scores:
+        jump = current_score - moving_avg
+        jump_pct = (jump / moving_avg * 100) if moving_avg != 0 else 0.0
+        if moving_std > 0:
+            z_score_val = abs(jump) / moving_std
+            is_significant = z_score_val >= significance_threshold
+        else:
+            is_significant = abs(jump) > 0.001
+
+    # --- Risk Metrics ---
+    # Peak-to-trough drawdown (uses historical only when current is separated)
+    drawdown_scores = historical_scores if (include_current and current_score is not None) else valid_scores
+    peak = drawdown_scores[0]
+    max_drawdown = 0.0
+    for s in drawdown_scores:
+        if s > peak:
+            peak = s
+        dd = (peak - s) / peak if peak > 0 else 0.0
+        if dd > max_drawdown:
+            max_drawdown = dd
+
+    # Consistency (% of quarters with positive QoQ change)
+    pos_qoq = sum(1 for c in qoq_changes[1:] if c > 0)
+    total_qoq = max(len(qoq_changes) - 1, 1)
+    consistency = pos_qoq / total_qoq
+
+    # Information Ratio (mean QoQ change / std of QoQ change — Sharpe analog)
+    qoq_valid = [c for i, c in enumerate(qoq_changes)
+                 if i > 0 and scores[i] is not None and scores[i - 1] is not None]
+    if len(qoq_valid) > 1 and np.std(qoq_valid, ddof=1) > 0:
+        info_ratio = np.mean(qoq_valid) / np.std(qoq_valid, ddof=1)
+    else:
+        info_ratio = 0.0
+
+    # Trend slope via linear regression on valid scores
+    xs = [i for i, s in enumerate(scores) if s is not None]
+    ys = [s for s in scores if s is not None]
+    if len(xs) >= 2:
+        coeffs = np.polyfit(xs, ys, 1)
+        trend_slope = coeffs[0]
+    else:
+        trend_slope = 0.0
+
+    # --- Regime Detection ---
+    if trend_slope > 0.005 and consistency >= 0.6:
+        regime = "BULLISH"
+        regime_color = "#00C805"
+    elif trend_slope < -0.005 and consistency <= 0.4:
+        regime = "BEARISH"
+        regime_color = "#FF4B4B"
+    else:
+        regime = "CONSOLIDATION"
+        regime_color = "#FFA500"
+
+    # --- MA Crossover Signal ---
+    crossover_signal = "NEUTRAL"
+    if len(short_ma) >= 2 and len(long_ma) >= 2:
+        s_curr, s_prev = short_ma[-1], short_ma[-2]
+        l_curr, l_prev = long_ma[-1], long_ma[-2]
+        if s_curr is not None and l_curr is not None and s_prev is not None and l_prev is not None:
+            if s_prev <= l_prev and s_curr > l_curr:
+                crossover_signal = "GOLDEN CROSS"
+            elif s_prev >= l_prev and s_curr < l_curr:
+                crossover_signal = "DEATH CROSS"
+
+    # =================================================================
+    #  SECTION 1 — EXECUTIVE VERDICT
+    # =================================================================
+    if include_current and jump is not None:
+        if is_significant and jump > 0:
+            verdict = "ACCELERATING — Fundamental Improvement Detected"
+            v_color = "#00C805"
+        elif is_significant and jump < 0:
+            verdict = "DECELERATING — Fundamental Deterioration Detected"
+            v_color = "#FF4B4B"
+        else:
+            verdict = "STEADY STATE — No Material Deviation from Trend"
+            v_color = "#FFA500"
+    else:
+        verdict = f"REGIME: {regime}"
+        v_color = regime_color
+
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+                border: 1px solid {v_color}; border-radius: 12px; padding: 20px 28px;
+                margin-bottom: 24px; box-shadow: 0 0 30px {v_color}33;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div style="color: #6B7280; font-size: 0.75em; text-transform: uppercase;
+                            letter-spacing: 2px; margin-bottom: 4px;">
+                    {trend_ticker} | CONVICTION CALL</div>
+                <div style="color: {v_color}; font-size: 1.6em; font-weight: 800;
+                            letter-spacing: 0.5px;">{verdict}</div>
+            </div>
+            <div style="text-align: right;">
+                <div style="color: #6B7280; font-size: 0.7em; text-transform: uppercase;
+                            letter-spacing: 1.5px;">Regime</div>
+                <div style="color: {regime_color}; font-size: 1.3em; font-weight: 700;">{regime}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # =================================================================
+    #  SECTION 2 — TOP METRICS ROW
+    # =================================================================
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    with m1:
+        st.metric("Weighted AIS", f"{current_score:.4f}" if current_score is not None else "N/A",
+                   delta=f"Delta: {jump:+.4f}" if jump is not None else None,
+                   help="The composite AIS score for the selected quarter, weighted by your criteria & sub-criteria sliders. Delta shows the deviation from the historical moving average (Current − MA).")
+    with m2:
+        st.metric(f"MA({long_window}Q)", f"{moving_avg:.4f}",
+                   help=f"Simple Moving Average of the Weighted AIS over the last {long_window} quarters. Calculated as the arithmetic mean of historical scores, smoothing out quarter-to-quarter noise.")
+    with m3:
+        st.metric("Volatility (σ)", f"{moving_std:.4f}",
+                   help="Standard deviation of historical Weighted AIS scores. Measures how much the score fluctuates quarter-to-quarter. Higher values indicate less predictable fundamentals.")
+    with m4:
+        st.metric("Max Drawdown", f"{max_drawdown:.1%}",
+                   help="Largest peak-to-trough decline in Weighted AIS across the selected period. Calculated as (Peak − Trough) / Peak. Indicates the worst-case fundamental deterioration observed.")
+    with m5:
+        st.metric("Consistency", f"{consistency:.0%}",
+                   help="Percentage of quarters that showed a positive QoQ (quarter-over-quarter) change in Weighted AIS. Higher values suggest steady fundamental improvement; lower values suggest erratic performance.")
+    with m6:
+        st.metric("Info Ratio", f"{info_ratio:.2f}",
+                   help="Information Ratio — a Sharpe-like measure for fundamentals. Calculated as Mean(QoQ changes) / Std(QoQ changes). Positive values mean consistent improvement; negative values mean consistent decline.")
+
+    st.divider()
+
+    # =================================================================
+    #  SECTION 3 — SIGNAL STRIP
+    # =================================================================
+    sig1, sig2, sig3, sig4 = st.columns(4)
+    with sig1:
+        jump_help = (
+            "Detects whether the current quarter's score is a statistically significant departure from the historical trend. "
+            f"Calculated as: z-score = |Current − MA| / σ. A z-score ≥ {significance_threshold} is flagged as SIGNIFICANT. "
+            "Delta shows the % deviation from MA and the z-score value."
+        )
+        if include_current and jump is not None:
+            direction = "UP" if jump > 0 else "DOWN"
+            sig_label = f"SIGNIFICANT {direction}" if is_significant else "Normal"
+            st.metric("Jump Signal", sig_label,
+                       delta=f"{jump_pct:+.1f}% | z={z_score_val:.2f}" if jump is not None else None,
+                       help=jump_help)
+        else:
+            st.metric("Jump Signal", "N/A", help=jump_help)
+    with sig2:
+        st.metric("MA Crossover", crossover_signal,
+                   delta=f"Short MA({short_window}Q) vs Long MA({long_window}Q)",
+                   delta_color="off",
+                   help=f"Compares the Short MA ({short_window}Q) against the Long MA ({long_window}Q). "
+                        "GOLDEN CROSS: Short MA crosses above Long MA — signals improving momentum. "
+                        "DEATH CROSS: Short MA crosses below Long MA — signals deteriorating momentum. "
+                        "NEUTRAL: No crossover detected in the latest period.")
+    with sig3:
+        slope_dir = "+" if trend_slope > 0 else ""
+        st.metric("Trend Slope", f"{slope_dir}{trend_slope:.4f}/Q",
+                   delta="Linear Regression",
+                   delta_color="off",
+                   help="The slope of an Ordinary Least Squares (OLS) linear regression fitted to the Weighted AIS scores over the selected quarters. "
+                        "Represents the average change in AIS per quarter. "
+                        "Positive = upward fundamental trend; Negative = downward fundamental trend.")
+    with sig4:
+        # Bollinger Band position
+        if current_score is not None and bb_upper[-1] is not None and bb_lower[-1] is not None:
+            bb_range = bb_upper[-1] - bb_lower[-1]
+            if bb_range > 0:
+                bb_pct = (current_score - bb_lower[-1]) / bb_range * 100
+            else:
+                bb_pct = 50.0
+            bb_label = f"{bb_pct:.0f}%"
+            if bb_pct > 90:
+                bb_note = "Overbought"
+            elif bb_pct < 10:
+                bb_note = "Oversold"
+            else:
+                bb_note = "Mid-Band"
+        else:
+            bb_label = "N/A"
+            bb_note = ""
+        st.metric("Bollinger %B", bb_label,
+                   delta=bb_note if bb_note else None,
+                   delta_color="off",
+                   help="Bollinger %B measures where the current score sits within the Bollinger Bands. "
+                        "Calculated as: (Current − Lower Band) / (Upper Band − Lower Band) × 100. "
+                        "Bands are set at ±2 standard deviations around the Long MA. "
+                        "Above 90% = Overbought (score unusually high vs history). "
+                        "Below 10% = Oversold (score unusually low vs history). "
+                        "50% = exactly at the moving average.")
+
+    st.divider()
+
+    # =================================================================
+    #  SECTION 4 — PRIMARY CHART (AIS + Dual MA + Bollinger Bands)
+    # =================================================================
+    st.subheader("AIS Score with Dual Moving Averages & Bollinger Bands")
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+        row_heights=[0.7, 0.3],
+        subplot_titles=["", "QoQ Momentum"]
+    )
+
+    # --- Row 1: Bollinger Band fill ---
+    fig.add_trace(go.Scatter(
+        x=quarter_labels, y=bb_upper, mode='lines',
+        line=dict(width=0), showlegend=False, hoverinfo='skip'
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=quarter_labels, y=bb_lower, mode='lines',
+        line=dict(width=0), fill='tonexty',
+        fillcolor='rgba(99,102,241,0.08)',
+        name='Bollinger Band (2σ)', hoverinfo='skip'
+    ), row=1, col=1)
+
+    # --- Row 1: Long MA ---
+    fig.add_trace(go.Scatter(
+        x=quarter_labels, y=long_ma, mode='lines',
+        name=f'Long MA ({long_window}Q)',
+        line=dict(color='#FFA500', width=2, dash='dash'),
+        hovertemplate='Long MA: %{y:.4f}<extra></extra>'
+    ), row=1, col=1)
+
+    # --- Row 1: Short MA ---
+    fig.add_trace(go.Scatter(
+        x=quarter_labels, y=short_ma, mode='lines',
+        name=f'Short MA ({short_window}Q)',
+        line=dict(color='#00BFFF', width=2),
+        hovertemplate='Short MA: %{y:.4f}<extra></extra>'
+    ), row=1, col=1)
+
+    # --- Row 1: AIS Score line ---
+    main_y = list(scores)
+    if include_current and current_score is not None:
+        main_y[-1] = None  # Gap — current plotted separately
+
+    fig.add_trace(go.Scatter(
+        x=quarter_labels, y=main_y,
+        mode='lines+markers', name='Weighted AIS',
+        line=dict(color='#6366F1', width=2.5),
+        marker=dict(size=7, color='#6366F1', line=dict(width=2, color='white')),
+        hovertemplate='<b>%{x}</b><br>AIS: %{y:.4f}<extra></extra>'
+    ), row=1, col=1)
+
+    # --- Row 1: Current quarter diamond ---
+    if include_current and current_score is not None:
+        m_color = '#00C805' if (jump and jump > 0) else '#FF4B4B' if (jump and jump < 0) else '#FFFFFF'
+        fig.add_trace(go.Scatter(
+            x=[current_label], y=[current_score],
+            mode='markers+text', name=f'Current ({current_label})',
+            marker=dict(size=14, color=m_color, symbol='diamond',
+                        line=dict(width=3, color='white')),
+            text=[f"{current_score:.4f}"], textposition='top center',
+            textfont=dict(color='white', size=11, family='monospace'),
+            hovertemplate='<b>%{x}</b><br>Current: %{y:.4f}<extra></extra>'
+        ), row=1, col=1)
+        # Connector
+        if len(scores) >= 2 and scores[-2] is not None:
+            fig.add_trace(go.Scatter(
+                x=[quarter_labels[-2], current_label],
+                y=[scores[-2], current_score],
+                mode='lines', line=dict(color=m_color, width=2, dash='dot'),
+                showlegend=False, hoverinfo='skip'
+            ), row=1, col=1)
+
+    # --- Row 1: Trend regression line ---
+    if len(xs) >= 2:
+        reg_y = [coeffs[0] * i + coeffs[1] for i in range(len(scores))]
+        fig.add_trace(go.Scatter(
+            x=quarter_labels, y=reg_y, mode='lines',
+            name='Trend (OLS)', line=dict(color='#9CA3AF', width=1, dash='dashdot'),
+            hoverinfo='skip'
+        ), row=1, col=1)
+
+    # --- Row 2: QoQ Momentum Bars ---
+    bar_colors = ['#00C805' if c > 0 else '#FF4B4B' if c < 0 else '#464B5C' for c in qoq_changes]
+    fig.add_trace(go.Bar(
+        x=quarter_labels, y=qoq_changes, name='QoQ Change',
+        marker_color=bar_colors,
+        hovertemplate='<b>%{x}</b><br>QoQ: %{y:+.4f}<extra></extra>'
+    ), row=2, col=1)
+
+    # --- Layout ---
+    fig.update_layout(
+        height=560,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='white', size=11),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04,
+                    xanchor="right", x=1, font=dict(color="white", size=10)),
+        margin=dict(l=60, r=20, t=30, b=40),
+        hovermode="x unified",
+        bargap=0.3
+    )
+    for row in [1, 2]:
+        fig.update_xaxes(gridcolor='#1e2035', tickfont=dict(color='#9CA3AF'), row=row, col=1)
+        fig.update_yaxes(gridcolor='#1e2035', tickfont=dict(color='#9CA3AF'), row=row, col=1)
+    fig.update_xaxes(tickangle=-45, row=2, col=1)
+    fig.update_yaxes(title_text="Weighted AIS", row=1, col=1)
+    fig.update_yaxes(title_text="QoQ Δ", row=2, col=1, zeroline=True,
+                     zerolinecolor='#464B5C', zerolinewidth=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # =================================================================
+    #  SECTION 5 — CRITERIA DECOMPOSITION
+    # =================================================================
+    st.subheader("Criteria Contribution Decomposition (Stacked)")
+
+    fig_stack = go.Figure()
+    crit_colors = {
+        "growth_potential": "#6366F1",
+        "earnings_quality": "#00C805",
+        "management_quality": "#00BFFF",
+        "business_risks": "#FF4B4B",
+    }
+    for crit in CRITERIA_KEYS:
+        fig_stack.add_trace(go.Bar(
+            x=quarter_labels,
+            y=criteria_series[crit],
+            name=CRITERIA_SHORT.get(crit, crit),
+            marker_color=crit_colors.get(crit, "#9CA3AF"),
+            hovertemplate=f'<b>%{{x}}</b><br>{CRITERIA_SHORT.get(crit, crit)}: %{{y:.4f}}<extra></extra>'
+        ))
+
+    fig_stack.update_layout(
+        barmode='stack',
+        height=350,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='white', size=11),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(color="white", size=10)),
+        margin=dict(l=60, r=20, t=20, b=40),
+        xaxis=dict(gridcolor='#1e2035', tickfont=dict(color='#9CA3AF'), tickangle=-45),
+        yaxis=dict(title="Weighted Contribution", gridcolor='#1e2035',
+                   tickfont=dict(color='#9CA3AF')),
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_stack, use_container_width=True)
+
+    # =================================================================
+    #  SECTION 6 — INSTITUTIONAL DATA TABLE
+    # =================================================================
+    with st.expander("Full Quarter-by-Quarter Data", expanded=False):
+        table_data = []
+        for i, (lbl, s) in enumerate(zip(quarter_labels, scores)):
+            row = {
+                "Quarter": lbl,
+                "Weighted AIS": f"{s:.4f}" if s is not None else "N/A",
+            }
+            # Per-criteria contributions
+            for crit in CRITERIA_KEYS:
+                cv = criteria_series[crit][i]
+                row[CRITERIA_SHORT.get(crit, crit)] = f"{cv:.4f}" if cv is not None else "-"
+            # QoQ
+            if i > 0 and scores[i - 1] is not None and s is not None:
+                d = s - scores[i - 1]
+                row["QoQ Δ"] = f"{d:+.4f}"
+                row["QoQ %"] = f"{(d / scores[i - 1] * 100):+.1f}%"
+            else:
+                row["QoQ Δ"] = "-"
+                row["QoQ %"] = "-"
+            # Short/Long MA
+            row[f"MA({short_window}Q)"] = f"{short_ma[i]:.4f}" if short_ma[i] is not None else "-"
+            row[f"MA({long_window}Q)"] = f"{long_ma[i]:.4f}" if long_ma[i] is not None else "-"
+            # Bollinger position
+            if s is not None and bb_upper[i] is not None and bb_lower[i] is not None:
+                brange = bb_upper[i] - bb_lower[i]
+                row["BB %B"] = f"{((s - bb_lower[i]) / brange * 100):.0f}%" if brange > 0 else "-"
+            else:
+                row["BB %B"] = "-"
+            # Signal column for current
+            if include_current and i == len(scores) - 1 and s is not None and jump is not None:
+                row["Signal"] = "SIGNIFICANT" if is_significant else "Normal"
+            else:
+                row["Signal"] = "-"
+            table_data.append(row)
+        st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
+
+
 # --- MAIN APP LOGIC ---
 
 def main():
@@ -1114,11 +1718,10 @@ def main():
         # Navigation Buttons
         st.button("📊 Dashboard", key="nav_dashboard", 
                  on_click=set_page, args=('dashboard',), use_container_width=True)
-        st.button("🔍 Compare Quarters", key="nav_compare", 
+        st.button("🔍 Compare Quarters", key="nav_compare",
                  on_click=set_page, args=('compare',), use_container_width=True)
-        st.button("🔔 Alerts & Watchlist", key="nav_alerts", use_container_width=True)
-        st.button("📄 Reports", key="nav_reports", use_container_width=True)
-        st.button("⚙️ Settings", key="nav_settings", use_container_width=True)
+        st.button("📈 Trend & Moving Avg", key="nav_trend",
+                 on_click=set_page, args=('trend',), use_container_width=True)
 
         st.markdown("---")
 
@@ -1200,6 +1803,8 @@ def main():
         render_dashboard(client, weights_config, default_weights)
     elif st.session_state['page'] == 'compare':
         render_compare_page(client, weights_config, default_weights)
+    elif st.session_state['page'] == 'trend':
+        render_trend_page(client, weights_config, default_weights)
     else:
         st.info("🚧 Page under construction")
 
