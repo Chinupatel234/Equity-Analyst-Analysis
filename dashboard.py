@@ -1689,6 +1689,504 @@ def render_trend_page(client, weights_config, default_weights):
         st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
 
+# --- COMPANY BREAKDOWN PAGE ---
+
+def render_company_breakdown(client, weights_config, default_weights):
+    st.markdown("""
+    <div class="header-bar">
+        <div>
+            <div class="brand">COMPANY BREAKDOWN</div>
+            <div class="brand-sub">Institutional Historical Analysis & Sub-Criteria Trends</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tickers_list, data_map = get_available_filters(client)
+    if not tickers_list:
+        st.warning("No data found.")
+        st.stop()
+
+    # ===== WEIGHT VALIDATION =====
+    weight_errors = []
+    crit_sum = sum(
+        st.session_state.get(f"cw_{c}", 0)
+        for c in default_weights["criteria_weights"]
+    )
+    if crit_sum != 100:
+        weight_errors.append(f"**Criteria weights** sum to **{crit_sum}%** (must be 100%)")
+    for crit, subs in default_weights["sub_criteria_definitions"].items():
+        sub_sum = sum(st.session_state.get(f"sw_{sk}", 0) for sk in subs)
+        if sub_sum != 100:
+            label = CRITERIA_DISPLAY.get(crit, crit.replace("_", " ").title())
+            weight_errors.append(f"**{label}** sub-criteria sum to **{sub_sum}%** (must be 100%)")
+    if weight_errors:
+        st.error("Weights must sum to exactly 100% before analysis can run.")
+        for err in weight_errors:
+            st.warning(err)
+        st.info("Adjust the sliders in the **Weight Configuration** panel or click **Reset**.")
+        return
+
+    # ===== COMPANY SELECTOR =====
+    selected_ticker = st.selectbox(
+        "Select Company",
+        tickers_list,
+        key="breakdown_ticker",
+        help="Choose a company to view its full historical breakdown"
+    )
+
+    st.divider()
+
+    # ===== BUILD FULL HISTORICAL DATA =====
+    all_quarters = []
+    for yr in sorted(data_map.get(selected_ticker, {}).keys()):
+        for q in sorted(data_map[selected_ticker][yr]):
+            all_quarters.append((yr, q))
+
+    if not all_quarters:
+        st.warning("No quarterly data available for this company.")
+        return
+
+    CRITERIA_KEYS = list(weights_config["criteria_weights"].keys())
+    CRITERIA_SHORT = {
+        "growth_potential": "Growth",
+        "earnings_quality": "Earn Qlty",
+        "management_quality": "Mgmt Qlty",
+        "business_risks": "Biz Risks",
+    }
+    SUB_KEYS_ORDERED = []
+    for crit in CRITERIA_KEYS:
+        for sub_key in weights_config["sub_criteria_definitions"].get(crit, {}):
+            SUB_KEYS_ORDERED.append((crit, sub_key))
+
+    # --- Fetch all data ---
+    raw_scores_per_quarter = []  # list of (label, yr, q, w_score, clean_scores, criteria_scores)
+    trend_data = {sub_key: [] for _, sub_key in SUB_KEYS_ORDERED}
+    trend_labels = []
+    weighted_ais_series = []
+    criteria_scores_series = {crit: [] for crit in CRITERIA_KEYS}
+
+    for yr, q in all_quarters:
+        raw_sub = calc_ais.fetch_quarter_data(client, selected_ticker, yr, q)
+        label = f"{q} {yr}"
+        trend_labels.append(label)
+
+        if not raw_sub:
+            for _, sub_key in SUB_KEYS_ORDERED:
+                trend_data[sub_key].append(None)
+            for crit in CRITERIA_KEYS:
+                criteria_scores_series[crit].append(None)
+            weighted_ais_series.append(None)
+            raw_scores_per_quarter.append((label, yr, q, None, None, None))
+            continue
+
+        clean = calc_ais.normalize_db_scores(raw_sub, weights_config)
+        w_score = calc_ais.calculate_weighted_ais(weights_config, clean)
+        weighted_ais_series.append(w_score)
+
+        crit_scores = {}
+        for crit in CRITERIA_KEYS:
+            sub_def = weights_config["sub_criteria_definitions"].get(crit, {})
+            crit_subs = clean.get(crit, {})
+            c_score = sum(crit_subs.get(k, 0.0) * w for k, w in sub_def.items())
+            crit_scores[crit] = c_score
+            criteria_scores_series[crit].append(c_score)
+
+        for crit_key, sub_key in SUB_KEYS_ORDERED:
+            score = clean.get(crit_key, {}).get(sub_key, 0.0)
+            trend_data[sub_key].append(score)
+
+        raw_scores_per_quarter.append((label, yr, q, w_score, clean, crit_scores))
+
+    valid_scores = [s for s in weighted_ais_series if s is not None]
+    if not valid_scores:
+        st.warning("No valid score data for this company.")
+        return
+
+    # =================================================================
+    #  SECTION 1: EXECUTIVE SUMMARY STRIP
+    # =================================================================
+    latest_score = valid_scores[-1]
+    hist_avg = np.mean(valid_scores)
+    hist_std = np.std(valid_scores, ddof=1) if len(valid_scores) > 1 else 0.0
+    best_score = max(valid_scores)
+    worst_score = min(valid_scores)
+
+    # Find best/worst quarter labels
+    best_idx = weighted_ais_series.index(best_score)
+    worst_idx = weighted_ais_series.index(worst_score)
+    best_label = trend_labels[best_idx]
+    worst_label = trend_labels[worst_idx]
+
+    # Streak: consecutive positive/negative QoQ changes from the latest quarter
+    streak = 0
+    streak_dir = ""
+    for i in range(len(weighted_ais_series) - 1, 0, -1):
+        curr = weighted_ais_series[i]
+        prev = weighted_ais_series[i - 1]
+        if curr is None or prev is None:
+            break
+        diff = curr - prev
+        if streak == 0:
+            streak_dir = "improvement" if diff > 0 else "decline" if diff < 0 else ""
+            if diff == 0:
+                break
+            streak = 1
+        else:
+            if (streak_dir == "improvement" and diff > 0) or (streak_dir == "decline" and diff < 0):
+                streak += 1
+            else:
+                break
+
+    # Percentile of latest score in history
+    percentile = sum(1 for s in valid_scores if s <= latest_score) / len(valid_scores) * 100
+
+    # Trend slope (linear regression)
+    xs = [i for i, s in enumerate(weighted_ais_series) if s is not None]
+    ys = [s for s in weighted_ais_series if s is not None]
+    trend_slope = np.polyfit(xs, ys, 1)[0] if len(xs) >= 2 else 0.0
+    trend_direction = "Uptrend" if trend_slope > 0.003 else "Downtrend" if trend_slope < -0.003 else "Flat"
+
+    # Executive summary cards
+    st.subheader(f"Executive Summary — {selected_ticker}")
+
+    ex1, ex2, ex3, ex4, ex5, ex6 = st.columns(6)
+    with ex1:
+        qoq_delta = None
+        if len(valid_scores) >= 2:
+            qoq_delta = valid_scores[-1] - valid_scores[-2]
+        st.metric(
+            "Latest AIS", f"{latest_score:.4f}",
+            delta=f"QoQ: {qoq_delta:+.4f}" if qoq_delta is not None else None,
+            help="Most recent quarter's Weighted AIS score with QoQ change"
+        )
+    with ex2:
+        st.metric(
+            "Historical Avg", f"{hist_avg:.4f}",
+            delta=f"Std: {hist_std:.4f}",
+            delta_color="off",
+            help=f"Mean and standard deviation across {len(valid_scores)} quarters"
+        )
+    with ex3:
+        st.metric(
+            "Best Quarter", f"{best_score:.4f}",
+            delta=best_label,
+            delta_color="off",
+            help="Highest Weighted AIS score achieved and the quarter it occurred"
+        )
+    with ex4:
+        st.metric(
+            "Worst Quarter", f"{worst_score:.4f}",
+            delta=worst_label,
+            delta_color="off",
+            help="Lowest Weighted AIS score and the quarter it occurred"
+        )
+    with ex5:
+        streak_text = f"{streak}Q {streak_dir}" if streak > 0 else "No streak"
+        st.metric(
+            "Current Streak", streak_text,
+            delta=f"Trend: {trend_direction}",
+            delta_color="off",
+            help="Consecutive quarters of improvement or decline from latest quarter, plus OLS trend direction"
+        )
+    with ex6:
+        st.metric(
+            "Hist. Percentile", f"{percentile:.0f}th",
+            delta=f"of {len(valid_scores)} quarters",
+            delta_color="off",
+            help="Where the latest score ranks in the full history (100th = best ever, 0th = worst ever)"
+        )
+
+    st.divider()
+
+    # =================================================================
+    #  SECTION 2: INSTITUTIONAL SCORE TABLE
+    # =================================================================
+    st.subheader(f"Full Quarterly Breakdown — {selected_ticker}")
+    st.caption(f"{len(all_quarters)} quarters | {all_quarters[0][0]} {all_quarters[0][1]} to {all_quarters[-1][0]} {all_quarters[-1][1]}")
+
+    # Build a lookup for YoY: (quarter_name, year) -> index
+    quarter_lookup = {}
+    for i, (yr, q) in enumerate(all_quarters):
+        quarter_lookup[(q, yr)] = i
+
+    table_rows = []
+    for i, (label, yr, q, w_score, clean, crit_scores) in enumerate(raw_scores_per_quarter):
+        if w_score is None:
+            continue
+
+        row = {"Quarter": label, "Weighted AIS": round(w_score, 4)}
+
+        # --- QoQ Change ---
+        prev_score = weighted_ais_series[i - 1] if i > 0 else None
+        if prev_score is not None:
+            qoq_abs = w_score - prev_score
+            qoq_pct = (qoq_abs / abs(prev_score) * 100) if prev_score != 0 else 0.0
+            row["QoQ Chg"] = round(qoq_abs, 4)
+            row["QoQ %"] = f"{qoq_pct:+.1f}%"
+        else:
+            row["QoQ Chg"] = None
+            row["QoQ %"] = "-"
+
+        # --- YoY Change (same quarter, prior year) ---
+        try:
+            prior_year = str(int(yr) - 1)
+            yoy_key = (q, prior_year)
+            if yoy_key in quarter_lookup:
+                yoy_idx = quarter_lookup[yoy_key]
+                yoy_score = weighted_ais_series[yoy_idx]
+                if yoy_score is not None:
+                    yoy_abs = w_score - yoy_score
+                    yoy_pct = (yoy_abs / abs(yoy_score) * 100) if yoy_score != 0 else 0.0
+                    row["YoY Chg"] = round(yoy_abs, 4)
+                    row["YoY %"] = f"{yoy_pct:+.1f}%"
+                else:
+                    row["YoY Chg"] = None
+                    row["YoY %"] = "-"
+            else:
+                row["YoY Chg"] = None
+                row["YoY %"] = "-"
+        except (ValueError, KeyError):
+            row["YoY Chg"] = None
+            row["YoY %"] = "-"
+
+        # --- Historical Percentile ---
+        scores_up_to_now = [s for s in weighted_ais_series[:i + 1] if s is not None]
+        if len(scores_up_to_now) >= 2:
+            pctl = sum(1 for s in scores_up_to_now if s <= w_score) / len(scores_up_to_now) * 100
+            row["Pctl"] = f"{pctl:.0f}th"
+        else:
+            row["Pctl"] = "-"
+
+        # --- Criteria-level scores ---
+        for crit in CRITERIA_KEYS:
+            short = CRITERIA_SHORT.get(crit, crit)
+            row[short] = round(crit_scores[crit], 4)
+
+        # --- All 20 sub-criteria ---
+        for crit_key, sub_key in SUB_KEYS_ORDERED:
+            score = clean.get(crit_key, {}).get(sub_key, 0.0)
+            display_name = SUB_CRITERIA_DISPLAY.get(sub_key, sub_key)
+            row[display_name] = round(score, 2)
+
+        table_rows.append(row)
+
+    if table_rows:
+        df = pd.DataFrame(table_rows)
+
+        # --- Gradient heatmap for sub-criteria ---
+        def heatmap_sub(val):
+            """Gradient from red (-1) through neutral (0) to green (+1)."""
+            if not isinstance(val, (int, float)):
+                return ''
+            clamped = max(-1.0, min(1.0, val))
+            if clamped > 0:
+                # Green gradient: more intense as score approaches +1
+                intensity = int(clamped * 80)
+                return f'background-color: rgba(0, 200, 5, {intensity / 100}); color: white'
+            elif clamped < 0:
+                # Red gradient: more intense as score approaches -1
+                intensity = int(abs(clamped) * 80)
+                return f'background-color: rgba(255, 75, 75, {intensity / 100}); color: white'
+            else:
+                return 'background-color: rgba(255, 193, 7, 0.2); color: #FFC107'
+
+        def style_qoq(val):
+            """Color QoQ change values."""
+            if not isinstance(val, (int, float)):
+                return ''
+            if val > 0:
+                return 'color: #00C805; font-weight: 600'
+            elif val < 0:
+                return 'color: #FF4B4B; font-weight: 600'
+            return 'color: #9CA3AF'
+
+        def style_ais(val):
+            if not isinstance(val, (int, float)):
+                return ''
+            if val >= 0.8:
+                return 'color: #00C805; font-weight: 700'
+            elif val < 0.5:
+                return 'color: #FF4B4B; font-weight: 700'
+            return 'color: #FFA500; font-weight: 700'
+
+        styled = df.style.map(style_ais, subset=["Weighted AIS"])
+
+        # QoQ and YoY change columns
+        for col_name in ["QoQ Chg", "YoY Chg"]:
+            if col_name in df.columns:
+                styled = styled.map(style_qoq, subset=[col_name])
+
+        # Heatmap on all 20 sub-criteria columns
+        sub_cols = [SUB_CRITERIA_DISPLAY.get(sk, sk) for _, sk in SUB_KEYS_ORDERED]
+        existing_sub_cols = [c for c in sub_cols if c in df.columns]
+        if existing_sub_cols:
+            styled = styled.map(heatmap_sub, subset=existing_sub_cols)
+
+        # Criteria-level columns colored
+        crit_col_names = [CRITERIA_SHORT.get(c, c) for c in CRITERIA_KEYS]
+        existing_crit_cols = [c for c in crit_col_names if c in df.columns]
+        if existing_crit_cols:
+            styled = styled.map(style_qoq, subset=existing_crit_cols)
+
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+
+        # Download
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="Download Full Breakdown as CSV",
+            data=csv,
+            file_name=f"{selected_ticker}_institutional_breakdown.csv",
+            mime="text/csv",
+            key="breakdown_csv"
+        )
+    else:
+        st.warning("No score data available for this company.")
+
+    st.divider()
+
+    # =================================================================
+    #  SECTION 3: INTERACTIVE SUB-CRITERIA TREND CHART
+    # =================================================================
+    st.subheader(f"Sub-Criteria Trend Analysis — {selected_ticker}")
+    st.caption("Select sub-criteria below to plot their raw scores over time. Colors grouped by criteria.")
+
+    CRITERIA_COLORS = {
+        "growth_potential": ["#6366F1", "#818CF8", "#A5B4FC", "#C7D2FE", "#E0E7FF"],
+        "earnings_quality": ["#10B981", "#34D399", "#6EE7B7", "#A7F3D0", "#D1FAE5"],
+        "management_quality": ["#06B6D4", "#22D3EE", "#67E8F9", "#A5F3FC", "#CFFAFE"],
+        "business_risks": ["#EF4444", "#F87171", "#FCA5A5", "#FECACA", "#FEE2E2"],
+    }
+
+    selected_subs = []
+
+    checkbox_cols = st.columns(4)
+    for idx, crit in enumerate(CRITERIA_KEYS):
+        with checkbox_cols[idx]:
+            crit_display = CRITERIA_DISPLAY.get(crit, crit)
+            st.markdown(f"**{crit_display}**")
+
+            sub_defs = weights_config["sub_criteria_definitions"].get(crit, {})
+            for sub_key in sub_defs:
+                sub_display = SUB_CRITERIA_DISPLAY.get(sub_key, sub_key)
+                if st.checkbox(sub_display, key=f"bd_cb_{sub_key}"):
+                    selected_subs.append((crit, sub_key))
+
+    if not selected_subs:
+        st.info("Select one or more sub-criteria above to see their trend lines.")
+    else:
+        # --- Main Trend Chart with QoQ momentum subplot ---
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+            row_heights=[0.7, 0.3],
+            subplot_titles=["", "QoQ Score Change"]
+        )
+
+        for crit, sub_key in selected_subs:
+            sub_display = SUB_CRITERIA_DISPLAY.get(sub_key, sub_key)
+            crit_color_palette = CRITERIA_COLORS.get(crit, ["#9CA3AF"] * 5)
+            sub_keys_in_crit = list(weights_config["sub_criteria_definitions"].get(crit, {}).keys())
+            color_idx = sub_keys_in_crit.index(sub_key) if sub_key in sub_keys_in_crit else 0
+            line_color = crit_color_palette[color_idx % len(crit_color_palette)]
+
+            y_values = trend_data[sub_key]
+
+            # Row 1: Score line
+            fig.add_trace(go.Scatter(
+                x=trend_labels,
+                y=y_values,
+                mode='lines+markers',
+                name=sub_display,
+                line=dict(color=line_color, width=2.5),
+                marker=dict(size=5, line=dict(width=1, color='white')),
+                hovertemplate=f'<b>{sub_display}</b><br>%{{x}}<br>Score: %{{y:.2f}}<extra></extra>',
+                connectgaps=True,
+                legendgroup=sub_key,
+            ), row=1, col=1)
+
+            # Row 2: QoQ change bars
+            qoq_vals = [0.0]
+            for j in range(1, len(y_values)):
+                if y_values[j] is not None and y_values[j - 1] is not None:
+                    qoq_vals.append(y_values[j] - y_values[j - 1])
+                else:
+                    qoq_vals.append(0.0)
+
+            bar_colors = [line_color if v >= 0 else '#FF4B4B' for v in qoq_vals]
+            fig.add_trace(go.Bar(
+                x=trend_labels,
+                y=qoq_vals,
+                name=f"{sub_display} QoQ",
+                marker_color=bar_colors,
+                opacity=0.6,
+                hovertemplate=f'<b>{sub_display}</b><br>%{{x}}<br>QoQ: %{{y:+.2f}}<extra></extra>',
+                showlegend=False,
+                legendgroup=sub_key,
+            ), row=2, col=1)
+
+        # Zero lines
+        fig.add_hline(y=0, line_dash="dash", line_color="#464B5C", line_width=1, row=1, col=1)
+        fig.add_hline(y=0, line_dash="dash", line_color="#464B5C", line_width=1, row=2, col=1)
+
+        fig.update_layout(
+            height=600,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white', size=11),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.04,
+                xanchor="left", x=0,
+                font=dict(color="white", size=10)
+            ),
+            margin=dict(l=60, r=20, t=40, b=60),
+            hovermode="x unified",
+            barmode="group",
+            bargap=0.3,
+        )
+        for row in [1, 2]:
+            fig.update_xaxes(gridcolor='#1e2035', tickfont=dict(color='#9CA3AF'), row=row, col=1)
+            fig.update_yaxes(gridcolor='#1e2035', tickfont=dict(color='#9CA3AF'), row=row, col=1)
+        fig.update_xaxes(tickangle=-45, row=2, col=1)
+        fig.update_yaxes(title_text="Raw Score", range=[-1.15, 1.15], zeroline=True,
+                         zerolinecolor='#464B5C', row=1, col=1)
+        fig.update_yaxes(title_text="QoQ Delta", zeroline=True,
+                         zerolinecolor='#464B5C', row=2, col=1)
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Institutional Summary Stats Table for selected subs ---
+        st.markdown("#### Selected Sub-Criteria — Statistical Profile")
+
+        stat_rows = []
+        for crit, sub_key in selected_subs:
+            sub_display = SUB_CRITERIA_DISPLAY.get(sub_key, sub_key)
+            vals = [v for v in trend_data[sub_key] if v is not None]
+            if not vals:
+                continue
+            # QoQ changes for this sub
+            sub_qoq = []
+            all_vals = trend_data[sub_key]
+            for j in range(1, len(all_vals)):
+                if all_vals[j] is not None and all_vals[j - 1] is not None:
+                    sub_qoq.append(all_vals[j] - all_vals[j - 1])
+            pos_qoq = sum(1 for c in sub_qoq if c > 0) if sub_qoq else 0
+            consistency = (pos_qoq / len(sub_qoq) * 100) if sub_qoq else 0.0
+
+            stat_rows.append({
+                "Sub-Criteria": sub_display,
+                "Latest": f"{vals[-1]:+.2f}",
+                "Avg": f"{np.mean(vals):+.2f}",
+                "Std Dev": f"{np.std(vals, ddof=1):.2f}" if len(vals) > 1 else "-",
+                "Min": f"{min(vals):+.2f}",
+                "Max": f"{max(vals):+.2f}",
+                "Range": f"{max(vals) - min(vals):.2f}",
+                "Consistency": f"{consistency:.0f}%",
+                "Quarters": len(vals),
+            })
+
+        if stat_rows:
+            st.dataframe(pd.DataFrame(stat_rows), use_container_width=True, hide_index=True)
+
+
 # --- MAIN APP LOGIC ---
 
 def main():
@@ -1722,6 +2220,8 @@ def main():
                  on_click=set_page, args=('compare',), use_container_width=True)
         st.button("📈 Trend & Moving Avg", key="nav_trend",
                  on_click=set_page, args=('trend',), use_container_width=True)
+        st.button("🏢 Company Breakdown", key="nav_breakdown",
+                 on_click=set_page, args=('breakdown',), use_container_width=True)
 
         st.markdown("---")
 
@@ -1805,6 +2305,8 @@ def main():
         render_compare_page(client, weights_config, default_weights)
     elif st.session_state['page'] == 'trend':
         render_trend_page(client, weights_config, default_weights)
+    elif st.session_state['page'] == 'breakdown':
+        render_company_breakdown(client, weights_config, default_weights)
     else:
         st.info("🚧 Page under construction")
 
